@@ -10,7 +10,7 @@ location, the permission bridge and a few WebView gaps.
 |---|---|
 | Store listing (App Store / Play) | ekincare Partner |
 | Home screen (under the icon) | ekincare Partner |
-| Bundle / application ID | `com.ekincare.onsitehealthcamp` (never changes) |
+| Bundle ID | `com.ekincare.partner` (permanent once uploaded; Android keeps `com.ekincare.onsitehealthcamp`) |
 
 ## Requirements
 

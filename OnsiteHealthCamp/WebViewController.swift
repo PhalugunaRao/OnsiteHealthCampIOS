@@ -36,8 +36,12 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var pendingFixes: [Int] = [] // shim request ids waiting for CoreLocation
     private var splashCover: UIView?
 
-    // Longest the splash waits for the page before showing whatever the WebView has.
-    private static let splashMaxSeconds: TimeInterval = 3
+    // After this the splash adds a "Connecting…" spinner; it still waits for the page, because
+    // removing it would only show a blank WebView while a slow network answers.
+    private static let splashSlowSeconds: TimeInterval = 3
+    // Page request timeout: on a dead network the offline page (with Retry) appears after this
+    // instead of iOS's 60s default.
+    private static let pageTimeoutSeconds: TimeInterval = 20
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -58,6 +62,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         content.add(self, name: "geolocation")
         content.add(self, name: "openSettings")
         content.add(self, name: "pageReady")
+        #if DEBUG
+        content.add(self, name: "apiTiming")
+        #endif
         content.addScriptMessageHandler(self, contentWorld: .page, name: "getPermissions")
 
         webView = WKWebView(frame: .zero, configuration: config)
@@ -88,7 +95,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                                name: UIContentSizeCategory.didChangeNotification, object: nil)
 
         trace("webView.load")
-        webView.load(URLRequest(url: webURL))
+        webView.load(URLRequest(url: webURL, timeoutInterval: Self.pageTimeoutSeconds))
     }
 
     // MARK: - Splash
@@ -97,8 +104,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// appears, long before the web page has loaded, so a kill-and-reopen showed a white
     /// WebView. Cover it with the same logo, laid out exactly like the launch screen (centred
     /// on the full screen, natural size), until the first screen has rendered
-    /// (DOMContentLoaded via `pageReady`), capped so a slow or offline start never hangs on
-    /// the logo.
+    /// (DOMContentLoaded via `pageReady`). On a slow network it adds "Connecting…" after 3s
+    /// rather than revealing a blank WebView; a dead network ends in the offline page after
+    /// the 20s request timeout, which also lifts the cover.
     private func showSplashCover() {
         let cover = UIView()
         cover.backgroundColor = UIColor(named: "LaunchBackground")
@@ -115,9 +123,31 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             logo.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
         ])
         splashCover = cover
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.splashMaxSeconds) { [weak self] in
-            self?.hideSplashCover()
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.splashSlowSeconds) { [weak self, weak cover, weak logo] in
+            guard let self, let cover, let logo, self.splashCover === cover else { return }
+            self.showConnecting(on: cover, below: logo)
         }
+    }
+
+    /// Slow network: say so under the logo instead of showing a blank screen.
+    private func showConnecting(on cover: UIView, below logo: UIView) {
+        trace("splash: slow network, showing Connecting…")
+        let spinner = UIActivityIndicatorView(style: .medium)
+        spinner.startAnimating()
+        let label = UILabel()
+        label.text = "Connecting…"
+        label.font = .preferredFont(forTextStyle: .subheadline)
+        label.textColor = .secondaryLabel
+        let row = UIStackView(arrangedSubviews: [spinner, label])
+        row.spacing = 8
+        row.alpha = 0
+        row.translatesAutoresizingMaskIntoConstraints = false
+        cover.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+            row.topAnchor.constraint(equalTo: logo.bottomAnchor, constant: 32),
+        ])
+        UIView.animate(withDuration: 0.25) { row.alpha = 1 }
     }
 
     private func hideSplashCover() {
@@ -137,6 +167,10 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: Self.pageReadySignal,
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        #if DEBUG
+        content.addUserScript(WKUserScript(source: Self.apiTimingTrace,
+                                           injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        #endif
     }
 
     // MARK: - Text size
@@ -174,6 +208,19 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
       });
     }, { once: true });
     """
+
+    #if DEBUG
+    // Debug only: 10s after launch, report every API call (fetch / XHR) the page made, with
+    // start and duration, so a slow start can be split into app vs network vs backend.
+    private static let apiTimingTrace = """
+    setTimeout(function () {
+      var calls = performance.getEntriesByType('resource')
+        .filter(function (e) { return e.initiatorType === 'xmlhttprequest' || e.initiatorType === 'fetch'; })
+        .map(function (e) { return Math.round(e.startTime) + 'ms +' + Math.round(e.duration) + 'ms ' + e.name.split('?')[0]; });
+      window.webkit.messageHandlers.apiTiming.postMessage(calls);
+    }, 10000);
+    """
+    #endif
 
     private static let noFocusZoom = """
     (function () {
@@ -240,6 +287,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         switch message.name {
         case "openSettings":
             openSettings() // iOS can only open the app's own Settings page
+        case "apiTiming":
+            (message.body as? [String] ?? []).forEach { trace("api " + $0) }
         case "pageReady":
             trace("pageReady (rendered + painted) \(message.body)")
             hideSplashCover()
