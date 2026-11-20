@@ -3,6 +3,20 @@ import CoreLocation
 import UIKit
 import WebKit
 
+#if DEBUG
+// Launch timing trace (debug builds only): milliseconds since the process started.
+private func trace(_ event: String) {
+    var info = kinfo_proc(), size = MemoryLayout<kinfo_proc>.size
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+    sysctl(&mib, 4, &info, &size, nil, 0)
+    let start = info.kp_proc.p_starttime
+    let startSec = Double(start.tv_sec) + Double(start.tv_usec) / 1_000_000
+    print(String(format: "[launch] %5.0f ms  %@", (Date().timeIntervalSince1970 - startSec) * 1000, event))
+}
+#else
+private func trace(_ event: String) {}
+#endif
+
 // Which site loads: AppConfig.swift.
 private let webURL = AppConfig.webURL
 
@@ -20,9 +34,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private var webView: WKWebView!
     private let locationManager = CLLocationManager()
     private var pendingFixes: [Int] = [] // shim request ids waiting for CoreLocation
+    private var splashCover: UIView?
+
+    // Longest the splash waits for the page before showing whatever the WebView has.
+    private static let splashMaxSeconds: TimeInterval = 3
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        trace("viewDidLoad")
         // Fills the status-bar / home-indicator strips; matches the web header (--n-50 #F9FAFB).
         view.backgroundColor = UIColor(red: 0xF9 / 255, green: 0xFA / 255, blue: 0xFB / 255, alpha: 1)
         locationManager.delegate = self
@@ -38,6 +57,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         installUserScripts(content)
         content.add(self, name: "geolocation")
         content.add(self, name: "openSettings")
+        content.add(self, name: "pageReady")
         content.addScriptMessageHandler(self, contentWorld: .page, name: "getPermissions")
 
         webView = WKWebView(frame: .zero, configuration: config)
@@ -58,6 +78,7 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             webView.leadingAnchor.constraint(equalTo: safe.leadingAnchor),
             webView.trailingAnchor.constraint(equalTo: safe.trailingAnchor),
         ])
+        showSplashCover()
 
         // Back from Settings, or a system camera/location alert closed.
         NotificationCenter.default.addObserver(self, selector: #selector(notifyPermissions),
@@ -66,7 +87,44 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         NotificationCenter.default.addObserver(self, selector: #selector(applyTextScale),
                                                name: UIContentSizeCategory.didChangeNotification, object: nil)
 
+        trace("webView.load")
         webView.load(URLRequest(url: webURL))
+    }
+
+    // MARK: - Splash
+
+    /// The launch screen (Info.plist UILaunchScreen) disappears as soon as this controller
+    /// appears, long before the web page has loaded, so a kill-and-reopen showed a white
+    /// WebView. Cover it with the same logo, laid out exactly like the launch screen (centred
+    /// on the full screen, natural size), until the first screen has rendered
+    /// (DOMContentLoaded via `pageReady`), capped so a slow or offline start never hangs on
+    /// the logo.
+    private func showSplashCover() {
+        let cover = UIView()
+        cover.backgroundColor = UIColor(named: "LaunchBackground")
+        let logo = UIImageView(image: UIImage(named: "LaunchLogo"))
+        [cover, logo].forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
+        cover.addSubview(logo)
+        view.addSubview(cover)
+        NSLayoutConstraint.activate([
+            cover.topAnchor.constraint(equalTo: view.topAnchor),
+            cover.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            cover.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            cover.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            logo.centerXAnchor.constraint(equalTo: cover.centerXAnchor),
+            logo.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
+        ])
+        splashCover = cover
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.splashMaxSeconds) { [weak self] in
+            self?.hideSplashCover()
+        }
+    }
+
+    private func hideSplashCover() {
+        guard let cover = splashCover else { return }
+        trace("splash hidden")
+        splashCover = nil
+        UIView.animate(withDuration: 0.25, animations: { cover.alpha = 0 }) { _ in cover.removeFromSuperview() }
     }
 
     private func installUserScripts(_ content: WKUserContentController) {
@@ -77,6 +135,8 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                                            injectionTime: .atDocumentStart, forMainFrameOnly: true))
         content.addUserScript(WKUserScript(source: Self.noFocusZoom,
                                            injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        content.addUserScript(WKUserScript(source: Self.pageReadySignal,
+                                           injectionTime: .atDocumentStart, forMainFrameOnly: true))
     }
 
     // MARK: - Text size
@@ -96,6 +156,25 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
     // iOS zooms the page when an input under 16px gets focus and stays zoomed.
     // maximum-scale=1 stops that inside the app only; the website itself is unchanged.
+    // DOMContentLoaded = the app's scripts have run and React has rendered the first screen.
+    // The splash drops here instead of at didFinish, which also waits for font files,
+    // the favicon and images — seconds on a slow mobile network.
+    private static let pageReadySignal = """
+    document.addEventListener('DOMContentLoaded', function () {
+      // Two frames later the rendered screen has been painted, so the fade reveals the page,
+      // not a blank WebView.
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          var t = performance.timing, s = t.navigationStart;
+          window.webkit.messageHandlers.pageReady.postMessage({
+            dns: t.domainLookupEnd - t.domainLookupStart, connect: t.connectEnd - t.connectStart,
+            firstByte: t.responseStart - s, html: t.responseEnd - s,
+            domContentLoaded: t.domContentLoadedEventEnd - s, painted: Math.round(performance.now()) });
+        });
+      });
+    }, { once: true });
+    """
+
     private static let noFocusZoom = """
     (function () {
       var m = document.querySelector('meta[name=viewport]');
@@ -161,6 +240,9 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         switch message.name {
         case "openSettings":
             openSettings() // iOS can only open the app's own Settings page
+        case "pageReady":
+            trace("pageReady (rendered + painted) \(message.body)")
+            hideSplashCover()
         case "geolocation":
             guard let body = message.body as? [String: Any], let id = body["id"] as? Int else { return }
             let maximumAge = (body["maximumAge"] as? Double) ?? 0
@@ -282,6 +364,14 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
 
     // MARK: - WKNavigationDelegate
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        trace("didStartProvisionalNavigation")
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        trace("didCommit (first byte of HTML)")
+    }
+
     func webView(_ webView: WKWebView,
                  decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -293,6 +383,12 @@ final class WebViewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         // tel:, mailto:, other hosts: hand to the system.
         UIApplication.shared.open(url)
         decisionHandler(.cancel)
+    }
+
+    // Fallback for pages without the DOMContentLoaded signal (offline page, other hosts).
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        trace("didFinish (all resources loaded)")
+        hideSplashCover()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

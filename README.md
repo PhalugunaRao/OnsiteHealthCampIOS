@@ -4,6 +4,14 @@ iOS wrapper app for the OnsiteApt web app (onsite camp operations for phlebotomi
 A SwiftUI shell hosts one `WKWebView` that loads the web app; native code only covers
 location, the permission bridge and a few WebView gaps.
 
+## App name
+
+| Where | Name |
+|---|---|
+| Store listing (App Store / Play) | ekincare Partner |
+| Home screen (under the icon) | ekincare Partner |
+| Bundle / application ID | `com.ekincare.onsitehealthcamp` (never changes) |
+
 ## Requirements
 
 - Xcode 16 or later (project uses folder-synchronised groups), iOS 15+ deployment target
