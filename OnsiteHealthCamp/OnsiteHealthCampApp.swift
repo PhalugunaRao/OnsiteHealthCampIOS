@@ -4,8 +4,11 @@ import SwiftUI
 struct OnsiteHealthCampApp: App {
     var body: some Scene {
         WindowGroup {
+            // Fill the whole screen so the status-bar / home-indicator strips show the
+            // controller's header colour, not SwiftUI's default (black in dark mode).
+            // The WebView itself stays pinned to the safe area; WKWebView handles the keyboard.
             WebContainer()
-                .ignoresSafeArea(.keyboard) // WKWebView already resizes for the keyboard itself
+                .ignoresSafeArea()
         }
     }
 }

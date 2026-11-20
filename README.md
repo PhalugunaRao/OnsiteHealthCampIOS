@@ -19,7 +19,7 @@ New Swift files dropped into `OnsiteHealthCamp/` are picked up automatically.
 
 ## Which URL loads
 
-Set at the top of `OnsiteHealthCamp/WebViewController.swift`:
+**Only edit `OnsiteHealthCamp/AppConfig.swift`:**
 
 | Configuration | URL |
 |---|---|

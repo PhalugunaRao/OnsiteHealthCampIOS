@@ -3,13 +3,8 @@ import CoreLocation
 import UIKit
 import WebKit
 
-// Debug (Xcode Run) loads the OnsiteApt PR preview — change per PR being tested.
-// Release (Archive / TestFlight) always loads prod.
-#if DEBUG
-let webURL = URL(string: "https://pr-13.d1fle6jimql6gu.amplifyapp.com")!
-#else
-let webURL = URL(string: "https://onsite-providers.ekincare.com")!
-#endif
+// Which site loads: AppConfig.swift.
+private let webURL = AppConfig.webURL
 
 /// One WKWebView loading the OnsiteApt web app.
 /// - Camera / file upload: WKWebView handles <input type="file"> natively
